@@ -55,7 +55,32 @@ if reviews_file is not None and returns_file is not None:
         lambda x: "negative" if x <= 2 else "positive"
     )
 
-    merged = pd.merge(reviews, returns, on="order_id", how="left")
+    # =========================
+# NORMALIZE COLUMN NAMES
+# =========================
+reviews.columns = reviews.columns.str.lower().str.strip()
+returns.columns = returns.columns.str.lower().str.strip()
+
+# Auto-detect order id column
+possible_keys = ["order_id", "orderid", "order id", "order_number"]
+
+review_key = next((c for c in reviews.columns if c in possible_keys), None)
+return_key = next((c for c in returns.columns if c in possible_keys), None)
+
+if review_key is None or return_key is None:
+    st.error("❌ Order ID column not found in one of the files")
+    st.write("Reviews columns:", reviews.columns.tolist())
+    st.write("Returns columns:", returns.columns.tolist())
+    st.stop()
+
+merged = pd.merge(
+    reviews,
+    returns,
+    left_on=review_key,
+    right_on=return_key,
+    how="left"
+)
+
 
     issue_baseline = (
         merged.groupby("issue")

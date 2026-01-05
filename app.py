@@ -29,11 +29,19 @@ def normalize(df):
     df.columns = df.columns.str.lower().str.strip().str.replace(" ", "_")
     return df
 
-def find_col(cols, options):
-    for o in options:
-        if o in cols:
-            return o
-    return None
+def extract_issue(text):
+    text = str(text).lower()
+    if any(x in text for x in ["quality", "broken", "defect", "poor"]):
+        return "Quality Demonstration"
+    if any(x in text for x in ["size", "fit", "small", "large"]):
+        return "Size / Fit Issue"
+    if any(x in text for x in ["delivery", "late", "delay"]):
+        return "Delivery Delay"
+    if any(x in text for x in ["packaging", "damaged", "box"]):
+        return "Packaging Issue"
+    if any(x in text for x in ["price", "costly", "expensive"]):
+        return "Pricing Concern"
+    return "Other"
 
 issue_baseline = None
 total_revenue_loss = 0
@@ -42,26 +50,24 @@ total_revenue_loss = 0
 # PROCESS REVIEWS
 # =========================
 if reviews_file is not None:
+
     reviews = normalize(pd.read_csv(reviews_file))
 
-    rating_col = find_col(reviews.columns, ["rating", "stars", "score"])
-    issue_col = find_col(reviews.columns, ["issue", "problem", "complaint", "reason"])
-
-    if rating_col is None or issue_col is None:
-        st.error("❌ Reviews file must contain Rating & Issue columns")
-        st.write(reviews.columns.tolist())
+    if "rating" not in reviews.columns or "review_text" not in reviews.columns:
+        st.error("❌ Reviews file must contain 'rating' and 'review_text'")
+        st.write("Found columns:", reviews.columns.tolist())
         st.stop()
 
-    reviews["sentiment"] = np.where(reviews[rating_col] <= 2, "negative", "positive")
+    reviews["issue"] = reviews["review_text"].apply(extract_issue)
+    reviews["sentiment"] = np.where(reviews["rating"] <= 2, "negative", "positive")
 
     review_summary = (
-        reviews.groupby(issue_col)
+        reviews.groupby("issue")
         .agg(
-            total_reviews=(rating_col, "count"),
+            total_reviews=("rating", "count"),
             negative_reviews=("sentiment", lambda x: (x == "negative").sum())
         )
         .reset_index()
-        .rename(columns={issue_col: "issue"})
     )
 
     review_summary["negative_rate"] = (
@@ -76,29 +82,35 @@ else:
 # PROCESS RETURNS (SEPARATE)
 # =========================
 if returns_file is not None:
+
     returns = normalize(pd.read_csv(returns_file))
 
-    issue_col_r = find_col(returns.columns, ["return_reason", "issue", "reason"])
-    refund_col = find_col(returns.columns, ["refund_amount", "refund", "amount"])
+    issue_col = None
+    for c in ["return_reason", "issue", "reason"]:
+        if c in returns.columns:
+            issue_col = c
 
-    if issue_col_r:
+    refund_col = "refund_amount" if "refund_amount" in returns.columns else None
+
+    if issue_col:
         returns_summary = (
-            returns.groupby(issue_col_r)
+            returns.groupby(issue_col)
             .agg(
-                returns=("refund_amount", "count"),
-                revenue_loss=(refund_col, "sum") if refund_col else ("refund_amount", "count")
+                returns=(issue_col, "count"),
+                revenue_loss=(refund_col, "sum") if refund_col else (issue_col, "count")
             )
             .reset_index()
-            .rename(columns={issue_col_r: "issue"})
+            .rename(columns={issue_col: "issue"})
         )
         total_revenue_loss = returns_summary["revenue_loss"].sum()
     else:
         returns_summary = pd.DataFrame()
+
 else:
     returns_summary = pd.DataFrame()
 
 # =========================
-# MERGE SAFELY (ISSUE LEVEL)
+# MERGE AT ISSUE LEVEL
 # =========================
 if not review_summary.empty:
     issue_baseline = review_summary.merge(
@@ -132,14 +144,14 @@ if issue_baseline is not None and not issue_baseline.empty:
     high_risk = issue_baseline[issue_baseline["negative_rate"] > 0.35]
 
     if not high_risk.empty:
-        st.error("🚨 HIGH RETURN RISK ISSUES")
+        st.error("🚨 HIGH RETURN RISK DETECTED")
         st.dataframe(high_risk[["issue", "negative_rate"]])
 
     # =========================
     # FUTURE RISK
     # =========================
     avg_risk = issue_baseline["negative_rate"].mean()
-    confidence = min(90, max(60, int(issue_baseline["total_reviews"].sum() / 10)))
+    confidence = min(90, max(60, int(issue_baseline["total_reviews"].sum() / 8)))
 
     st.success(
         f"Expected future return risk: {round(avg_risk*100,2)}% "
@@ -147,7 +159,7 @@ if issue_baseline is not None and not issue_baseline.empty:
     )
 
     # =========================
-    # AUTO FIX TASKS
+    # AUTO FIXES
     # =========================
     st.subheader("🛠️ Auto-Generated Fixes")
 
@@ -163,7 +175,6 @@ if issue_baseline is not None and not issue_baseline.empty:
 if sku_file is not None:
 
     skus = normalize(pd.read_csv(sku_file))
-
     st.subheader("🚀 Pre-Launch SKU Risk Scores")
 
     results = []
@@ -176,7 +187,7 @@ if sku_file is not None:
             conf = min(90, max(60, int(top["total_reviews"] / 5)))
         else:
             risk = round(np.random.uniform(0.15, 0.35), 2)
-            driver = "Category benchmark"
+            driver = "Category Benchmark"
             conf = 55
 
         results.append({
@@ -189,8 +200,7 @@ if sku_file is not None:
             "Recommendation": "❌ Fix Before Launch" if risk > 0.3 else "✅ Safe to Launch"
         })
 
-    sku_df = pd.DataFrame(results)
-    st.dataframe(sku_df)
+    st.dataframe(pd.DataFrame(results))
 
 # =========================
 # AI COPILOT
@@ -203,10 +213,10 @@ q = st.text_input("Ask: Why are returns high? Should I launch this SKU?")
 if q:
     q = q.lower()
     if "why" in q:
-        st.success("Returns are driven by quality gaps and expectation mismatch.")
+        st.success("Returns are mainly driven by quality, fit, and delivery issues.")
     elif "launch" in q:
         st.success("Launch low-risk SKUs. Fix top issue drivers before scaling.")
     elif "improve" in q:
-        st.success("Improve quality, packaging clarity, and descriptions.")
+        st.success("Improve product quality, packaging, and expectation setting.")
     else:
-        st.success("I’ve analyzed your data and highlighted key risks.")
+        st.success("I’ve analyzed your data and identified key return risks.")

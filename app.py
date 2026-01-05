@@ -6,243 +6,174 @@ import matplotlib.pyplot as plt
 # =========================
 # APP CONFIG
 # =========================
-st.set_page_config(
-    page_title="AI Returns Intelligence Copilot",
-    layout="wide"
-)
-
+st.set_page_config(page_title="AI Returns Copilot", layout="wide")
 st.title("📦 AI Returns Intelligence Copilot")
-st.caption("Predict • Prevent • Improve Product Returns | MVP")
+st.caption("Predict • Prevent • Improve Returns (Production MVP)")
 
 # =========================
-# FILE UPLOADERS (ALWAYS VISIBLE)
+# FILE UPLOADERS
 # =========================
-st.subheader("📤 Upload Historical Data")
+st.subheader("📤 Upload Data")
 
-reviews_file = st.file_uploader(
-    "Upload Customer Reviews CSV",
-    type=["csv"]
-)
-
-returns_file = st.file_uploader(
-    "Upload Returns CSV",
-    type=["csv"]
-)
+reviews_file = st.file_uploader("Customer Reviews CSV", type="csv")
+returns_file = st.file_uploader("Returns CSV", type="csv")
 
 st.markdown("---")
-st.subheader("🚀 Pre-Launch SKU Risk Scoring")
-
-sku_file = st.file_uploader(
-    "Upload New SKU CSV",
-    type=["csv"]
-)
-
-st.markdown("---")
+st.subheader("🚀 Pre-Launch SKU Scoring")
+sku_file = st.file_uploader("New SKU CSV", type="csv")
 
 # =========================
-# HELPER FUNCTIONS
+# HELPERS
 # =========================
-def normalize_columns(df):
-    df.columns = (
-        df.columns
-        .str.lower()
-        .str.strip()
-        .str.replace(" ", "_")
-    )
+def normalize(df):
+    df.columns = df.columns.str.lower().str.strip().str.replace(" ", "_")
     return df
 
-def detect_order_key(columns):
-    possible = [
-        "order_id", "orderid", "order_no",
-        "order_number", "order"
-    ]
-    for p in possible:
-        if p in columns:
-            return p
+def find_col(cols, options):
+    for o in options:
+        if o in cols:
+            return o
     return None
 
-# =========================
-# PROCESS REVIEWS & RETURNS
-# =========================
 issue_baseline = None
-high_risk = pd.DataFrame()
+total_revenue_loss = 0
 
-if reviews_file is not None and returns_file is not None:
+# =========================
+# PROCESS REVIEWS
+# =========================
+if reviews_file is not None:
+    reviews = normalize(pd.read_csv(reviews_file))
 
-    reviews = normalize_columns(pd.read_csv(reviews_file))
-    returns = normalize_columns(pd.read_csv(returns_file))
+    rating_col = find_col(reviews.columns, ["rating", "stars", "score"])
+    issue_col = find_col(reviews.columns, ["issue", "problem", "complaint", "reason"])
 
-    review_key = detect_order_key(reviews.columns)
-    return_key = detect_order_key(returns.columns)
-
-    if review_key is None or return_key is None:
-        st.error("❌ Order ID column not found in one or both files")
-        st.write("Reviews columns:", reviews.columns.tolist())
-        st.write("Returns columns:", returns.columns.tolist())
+    if rating_col is None or issue_col is None:
+        st.error("❌ Reviews file must contain Rating & Issue columns")
+        st.write(reviews.columns.tolist())
         st.stop()
 
-    merged = pd.merge(
-        reviews,
-        returns,
-        left_on=review_key,
-        right_on=return_key,
-        how="left"
-    )
+    reviews["sentiment"] = np.where(reviews[rating_col] <= 2, "negative", "positive")
 
-    # Safety checks
-    required_cols = ["rating", "issue"]
-    for col in required_cols:
-        if col not in merged.columns:
-            st.error(f"❌ Missing required column: {col}")
-            st.stop()
-
-    merged["sentiment"] = np.where(
-        merged["rating"] <= 2, "negative", "positive"
-    )
-
-    # =========================
-    # ISSUE BASELINE
-    # =========================
-    issue_baseline = (
-        merged.groupby("issue")
+    review_summary = (
+        reviews.groupby(issue_col)
         .agg(
-            total_reviews=("rating", "count"),
-            negative_reviews=("sentiment", lambda x: (x == "negative").sum()),
-            returns=("return_reason", "count"),
-            revenue_loss=("refund_amount", "sum")
+            total_reviews=(rating_col, "count"),
+            negative_reviews=("sentiment", lambda x: (x == "negative").sum())
         )
         .reset_index()
+        .rename(columns={issue_col: "issue"})
     )
 
-    issue_baseline["negative_rate"] = (
-        issue_baseline["negative_reviews"] /
-        issue_baseline["total_reviews"]
+    review_summary["negative_rate"] = (
+        review_summary["negative_reviews"] /
+        review_summary["total_reviews"]
     ).fillna(0)
 
-    # =========================
-    # DASHBOARD
-    # =========================
+else:
+    review_summary = pd.DataFrame()
+
+# =========================
+# PROCESS RETURNS (SEPARATE)
+# =========================
+if returns_file is not None:
+    returns = normalize(pd.read_csv(returns_file))
+
+    issue_col_r = find_col(returns.columns, ["return_reason", "issue", "reason"])
+    refund_col = find_col(returns.columns, ["refund_amount", "refund", "amount"])
+
+    if issue_col_r:
+        returns_summary = (
+            returns.groupby(issue_col_r)
+            .agg(
+                returns=("refund_amount", "count"),
+                revenue_loss=(refund_col, "sum") if refund_col else ("refund_amount", "count")
+            )
+            .reset_index()
+            .rename(columns={issue_col_r: "issue"})
+        )
+        total_revenue_loss = returns_summary["revenue_loss"].sum()
+    else:
+        returns_summary = pd.DataFrame()
+else:
+    returns_summary = pd.DataFrame()
+
+# =========================
+# MERGE SAFELY (ISSUE LEVEL)
+# =========================
+if not review_summary.empty:
+    issue_baseline = review_summary.merge(
+        returns_summary,
+        on="issue",
+        how="left"
+    ).fillna(0)
+
+# =========================
+# DASHBOARD
+# =========================
+if issue_baseline is not None and not issue_baseline.empty:
+
     st.subheader("📊 Return Risk Dashboard")
 
     col1, col2 = st.columns(2)
 
     with col1:
-        st.metric(
-            "💸 Total Revenue Lost",
-            f"₹{int(issue_baseline.revenue_loss.sum()):,}"
-        )
-        st.dataframe(
-            issue_baseline.sort_values(
-                "negative_rate", ascending=False
-            )
-        )
+        st.metric("💸 Estimated Revenue Loss", f"₹{int(total_revenue_loss):,}")
+        st.dataframe(issue_baseline.sort_values("negative_rate", ascending=False))
 
     with col2:
         fig, ax = plt.subplots()
-        ax.barh(
-            issue_baseline["issue"],
-            issue_baseline["negative_rate"]
-        )
-        ax.set_xlabel("Negative Review Rate")
-        ax.set_title("Return Risk by Issue")
+        ax.barh(issue_baseline["issue"], issue_baseline["negative_rate"])
+        ax.set_title("Negative Review Rate by Issue")
         st.pyplot(fig)
 
     # =========================
     # ALERTS
     # =========================
-    high_risk = issue_baseline[
-        issue_baseline["negative_rate"] > 0.35
-    ]
+    high_risk = issue_baseline[issue_baseline["negative_rate"] > 0.35]
 
     if not high_risk.empty:
-        st.error("🚨 HIGH RETURN RISK DETECTED")
-        st.dataframe(
-            high_risk[["issue", "negative_rate"]]
-        )
+        st.error("🚨 HIGH RETURN RISK ISSUES")
+        st.dataframe(high_risk[["issue", "negative_rate"]])
 
     # =========================
-    # FUTURE RISK PREDICTION
+    # FUTURE RISK
     # =========================
-    st.subheader("🔮 Future Return Risk Prediction")
-
-    projected_risk = issue_baseline["negative_rate"].mean()
-    confidence = min(
-        90,
-        max(55, int(issue_baseline["total_reviews"].sum() / 8))
-    )
+    avg_risk = issue_baseline["negative_rate"].mean()
+    confidence = min(90, max(60, int(issue_baseline["total_reviews"].sum() / 10)))
 
     st.success(
-        f"Expected return risk next cycle: "
-        f"{round(projected_risk*100,2)}% "
+        f"Expected future return risk: {round(avg_risk*100,2)}% "
         f"(Confidence: {confidence}%)"
     )
 
     # =========================
-    # AUTO PRODUCT IMPROVEMENTS
+    # AUTO FIX TASKS
     # =========================
     st.subheader("🛠️ Auto-Generated Fixes")
 
-    if high_risk.empty:
-        st.info("No critical issues detected 🎉")
-    else:
-        for _, row in high_risk.iterrows():
-            st.write(
-                f"• Improve **{row['issue']}** "
-                f"(~{round(row['negative_rate']*100,1)}% dissatisfaction)"
-            )
-
-    # =========================
-    # WHAT-IF SIMULATION
-    # =========================
-    st.subheader("🧪 What-If Simulation")
-
-    reduction = st.slider(
-        "Reduce negative reviews for top issue (%)",
-        0, 50, 20
-    )
-
-    top_issue = issue_baseline.sort_values(
-        "negative_rate", ascending=False
-    ).iloc[0]
-
-    new_risk = top_issue["negative_rate"] * (1 - reduction / 100)
-
-    st.info(
-        f"If **{top_issue['issue']}** improves by {reduction}%, "
-        f"risk drops from "
-        f"{round(top_issue['negative_rate']*100,2)}% → "
-        f"{round(new_risk*100,2)}%"
-    )
-
-else:
-    st.info("👆 Upload Reviews & Returns CSVs to activate analytics")
+    for _, r in high_risk.iterrows():
+        st.write(
+            f"• Improve **{r['issue']}** "
+            f"(~{round(r['negative_rate']*100,1)}% dissatisfaction)"
+        )
 
 # =========================
-# PRE-LAUNCH SKU SCORING
+# SKU PRE-LAUNCH SCORING
 # =========================
 if sku_file is not None:
 
-    skus = normalize_columns(pd.read_csv(sku_file))
+    skus = normalize(pd.read_csv(sku_file))
 
-    required_sku_cols = ["sku_name", "category", "price"]
-    for col in required_sku_cols:
-        if col not in skus.columns:
-            st.error(f"❌ SKU file missing column: {col}")
-            st.stop()
-
-    st.subheader("🚀 SKU Pre-Launch Risk Scores")
+    st.subheader("🚀 Pre-Launch SKU Risk Scores")
 
     results = []
 
     for _, sku in skus.iterrows():
-
         if issue_baseline is not None:
-            top_issue = issue_baseline.sort_values(
-                "negative_rate", ascending=False
-            ).iloc[0]
-            risk = round(top_issue["negative_rate"], 2)
-            driver = top_issue["issue"]
-            conf = min(90, max(60, int(top_issue["total_reviews"] / 5)))
+            top = issue_baseline.sort_values("negative_rate", ascending=False).iloc[0]
+            risk = round(top["negative_rate"], 2)
+            driver = top["issue"]
+            conf = min(90, max(60, int(top["total_reviews"] / 5)))
         else:
             risk = round(np.random.uniform(0.15, 0.35), 2)
             driver = "Category benchmark"
@@ -253,54 +184,29 @@ if sku_file is not None:
             "Category": sku["category"],
             "Price": sku["price"],
             "Predicted Return Risk": risk,
-            "Primary Risk Driver": driver,
+            "Primary Driver": driver,
             "Confidence (%)": conf,
-            "Recommendation": (
-                "❌ Fix Before Launch"
-                if risk > 0.3 else
-                "✅ Safe to Launch"
-            )
+            "Recommendation": "❌ Fix Before Launch" if risk > 0.3 else "✅ Safe to Launch"
         })
 
     sku_df = pd.DataFrame(results)
     st.dataframe(sku_df)
 
-    fig2, ax2 = plt.subplots()
-    ax2.barh(
-        sku_df["SKU"],
-        sku_df["Predicted Return Risk"]
-    )
-    ax2.set_title("Pre-Launch Return Risk by SKU")
-    st.pyplot(fig2)
-
 # =========================
 # AI COPILOT
 # =========================
 st.markdown("---")
-st.subheader("🤖 Ask the Returns Copilot")
+st.subheader("🤖 Ask the Copilot")
 
-question = st.text_input(
-    "Ask (e.g. Why are returns high? Should I launch this SKU?)"
-)
+q = st.text_input("Ask: Why are returns high? Should I launch this SKU?")
 
-if question:
-    q = question.lower()
-
+if q:
+    q = q.lower()
     if "why" in q:
-        st.success(
-            "Returns are driven by quality gaps, expectation mismatch, "
-            "and inconsistent delivery experience."
-        )
+        st.success("Returns are driven by quality gaps and expectation mismatch.")
     elif "launch" in q:
-        st.success(
-            "Launch low-risk SKUs now. Improve high-risk drivers before scaling."
-        )
+        st.success("Launch low-risk SKUs. Fix top issue drivers before scaling.")
     elif "improve" in q:
-        st.success(
-            "Focus on product quality, packaging clarity, "
-            "and accurate product descriptions."
-        )
+        st.success("Improve quality, packaging clarity, and descriptions.")
     else:
-        st.success(
-            "I analyzed your data and identified key return risk drivers."
-        )
+        st.success("I’ve analyzed your data and highlighted key risks.")

@@ -1,4 +1,3 @@
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -17,31 +16,18 @@ st.caption("Predict • Prevent • Improve Returns | Free MVP")
 # =========================
 st.subheader("📤 Data Uploads")
 
-reviews_file = st.file_uploader(
-    "Upload Customer Reviews CSV",
-    type=["csv"],
-    key="reviews"
-)
-
-returns_file = st.file_uploader(
-    "Upload Returns CSV",
-    type=["csv"],
-    key="returns"
-)
+reviews_file = st.file_uploader("Upload Customer Reviews CSV", type=["csv"])
+returns_file = st.file_uploader("Upload Returns CSV", type=["csv"])
 
 st.markdown("---")
-
 st.subheader("🚀 Pre-Launch SKU Scoring (Always Visible)")
-
-sku_file = st.file_uploader(
-    "Upload New SKU CSV",
-    type=["csv"],
-    key="sku"
-)
-
+sku_file = st.file_uploader("Upload New SKU CSV", type=["csv"])
 st.write("DEBUG → SKU file status:", sku_file)
 
 st.markdown("---")
+
+issue_baseline = None  # SAFE INITIALIZATION
+
 # =========================
 # PROCESS REVIEWS & RETURNS
 # =========================
@@ -56,7 +42,6 @@ if reviews_file is not None and returns_file is not None:
 
     # Detect order id column
     possible_keys = ["order_id", "orderid", "order id", "order_number"]
-
     review_key = next((c for c in reviews.columns if c in possible_keys), None)
     return_key = next((c for c in returns.columns if c in possible_keys), None)
 
@@ -74,14 +59,10 @@ if reviews_file is not None and returns_file is not None:
         how="left"
     )
 
-    # Sentiment
     merged["sentiment"] = merged["rating"].apply(
         lambda x: "negative" if x <= 2 else "positive"
     )
 
-    # =========================
-    # ISSUE BASELINE (NO EXTRA INDENT)
-    # =========================
     issue_baseline = (
         merged.groupby("issue")
         .agg(
@@ -97,10 +78,6 @@ if reviews_file is not None and returns_file is not None:
         issue_baseline["negative_reviews"] /
         issue_baseline["total_reviews"]
     ).fillna(0)
-
-else:
-    st.info("👆 Upload Reviews & Returns files to activate analytics")
-
 
     # =========================
     # DASHBOARD
@@ -123,7 +100,6 @@ else:
     # ALERTS
     # =========================
     high_risk = issue_baseline[issue_baseline["negative_rate"] > 0.35]
-
     if not high_risk.empty:
         st.error("🚨 ALERT: High Return Risk Detected")
         st.dataframe(high_risk[["issue", "negative_rate"]])
@@ -132,36 +108,19 @@ else:
     # FUTURE RISK PREDICTION
     # =========================
     st.subheader("🔮 Future Return Risk Prediction")
-
     projected_risk = issue_baseline["negative_rate"].mean()
     confidence = min(90, max(50, int(issue_baseline["total_reviews"].sum() / 10)))
 
     st.success(
         f"Expected return risk next cycle: "
-        f"{round(projected_risk*100,2)}% "
-        f"(Confidence: {confidence}%)"
+        f"{round(projected_risk*100,2)}% (Confidence: {confidence}%)"
     )
-
-    # =========================
-    # AUTO PRODUCT FIXES
-    # =========================
-    st.subheader("🛠️ Auto-Generated Product Improvement Tasks")
-
-    for _, row in high_risk.iterrows():
-        st.write(
-            f"• Improve **{row['issue']}** "
-            f"(~{round(row['negative_rate']*100,1)}% dissatisfaction)"
-        )
 
     # =========================
     # WHAT-IF SIMULATION
     # =========================
     st.subheader("🧪 What-If Simulation")
-
-    reduction = st.slider(
-        "Reduce top issue negative reviews by (%)",
-        0, 50, 20
-    )
+    reduction = st.slider("Reduce top issue negative reviews by (%)", 0, 50, 20)
 
     top_issue = issue_baseline.sort_values(
         "negative_rate", ascending=False
@@ -185,14 +144,13 @@ else:
 if sku_file is not None:
 
     skus = pd.read_csv(sku_file)
-
     st.subheader("🚀 Pre-Launch SKU Risk Scoring Results")
 
     sku_results = []
 
     for _, sku in skus.iterrows():
 
-        if "issue_baseline" in globals():
+        if issue_baseline is not None:
             top_issue = issue_baseline.sort_values(
                 "negative_rate", ascending=False
             ).iloc[0]
@@ -236,10 +194,10 @@ question = st.text_input(
 
 if question:
     if "why" in question.lower():
-        st.success("Returns are driven mainly by quality and expectation gaps.")
+        st.success("Returns are mainly driven by product quality and expectation gaps.")
     elif "launch" in question.lower():
         st.success("Launch low-risk SKUs now. Fix high-risk SKUs before scaling.")
     elif "improve" in question.lower():
-        st.success("Improve product quality, packaging clarity, and sizing info.")
+        st.success("Improve quality, packaging clarity, and sizing info.")
     else:
         st.success("I analyzed your data and highlighted key return risks.")

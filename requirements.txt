@@ -3,5 +3,3 @@ pandas
 numpy
 matplotlib
 scikit-learn
-google-generativeai
-plotly

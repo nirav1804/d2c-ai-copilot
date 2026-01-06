@@ -3,12 +3,21 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.cluster import KMeans
+from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import LabelEncoder
+
 # =========================
 # APP CONFIG
 # =========================
-st.set_page_config(page_title="AI Returns Copilot", layout="wide")
+st.set_page_config(
+    page_title="AI Returns Intelligence Copilot (CMO)",
+    layout="wide"
+)
+
 st.title("📦 AI Returns Intelligence Copilot")
-st.caption("Predict • Prevent • Improve Returns (Production MVP)")
+st.caption("CMO-grade decisions for Returns, Revenue & Growth")
 
 # =========================
 # FILE UPLOADERS
@@ -16,11 +25,7 @@ st.caption("Predict • Prevent • Improve Returns (Production MVP)")
 st.subheader("📤 Upload Data")
 
 reviews_file = st.file_uploader("Customer Reviews CSV", type="csv")
-returns_file = st.file_uploader("Returns CSV", type="csv")
-
-st.markdown("---")
-st.subheader("🚀 Pre-Launch SKU Scoring")
-sku_file = st.file_uploader("New SKU CSV", type="csv")
+sku_file = st.file_uploader("New SKU CSV (Pre-Launch)", type="csv")
 
 # =========================
 # HELPERS
@@ -29,194 +34,284 @@ def normalize(df):
     df.columns = df.columns.str.lower().str.strip().str.replace(" ", "_")
     return df
 
-def extract_issue(text):
-    text = str(text).lower()
-    if any(x in text for x in ["quality", "broken", "defect", "poor"]):
-        return "Quality Demonstration"
-    if any(x in text for x in ["size", "fit", "small", "large"]):
-        return "Size / Fit Issue"
-    if any(x in text for x in ["delivery", "late", "delay"]):
-        return "Delivery Delay"
-    if any(x in text for x in ["packaging", "damaged", "box"]):
-        return "Packaging Issue"
-    if any(x in text for x in ["price", "costly", "expensive"]):
-        return "Pricing Concern"
-    return "Other"
+# =========================
+# ML ISSUE CLUSTERING
+# =========================
+def cluster_issues(df, text_col, n_clusters=5):
+    tfidf = TfidfVectorizer(
+        stop_words="english",
+        max_features=800
+    )
+    X = tfidf.fit_transform(df[text_col].astype(str))
 
+    model = KMeans(
+        n_clusters=n_clusters,
+        random_state=42,
+        n_init=10
+    )
+    df["cluster"] = model.fit_predict(X)
+
+    terms = tfidf.get_feature_names_out()
+    labels = {}
+    for i in range(n_clusters):
+        top = model.cluster_centers_[i].argsort()[-3:]
+        labels[i] = ", ".join([terms[t] for t in top])
+
+    df["issue"] = df["cluster"].map(labels)
+    return df
+
+# =========================
+# MAIN PROCESSING
+# =========================
 issue_baseline = None
-total_revenue_loss = 0
+sku_model = None
+le = LabelEncoder()
 
-# =========================
-# PROCESS REVIEWS
-# =========================
-if reviews_file is not None:
+if reviews_file:
 
     reviews = normalize(pd.read_csv(reviews_file))
 
-    if "rating" not in reviews.columns or "review_text" not in reviews.columns:
-        st.error("❌ Reviews file must contain 'rating' and 'review_text'")
-        st.write("Found columns:", reviews.columns.tolist())
+    if not {"review_text", "rating"}.issubset(reviews.columns):
+        st.error("Reviews file must contain: review_text, rating")
         st.stop()
 
-    reviews["issue"] = reviews["review_text"].apply(extract_issue)
-    reviews["sentiment"] = np.where(reviews["rating"] <= 2, "negative", "positive")
+    reviews = cluster_issues(reviews, "review_text")
+    reviews["is_negative"] = (reviews["rating"] <= 2).astype(int)
 
-    review_summary = (
+    issue_baseline = (
         reviews.groupby("issue")
         .agg(
             total_reviews=("rating", "count"),
-            negative_reviews=("sentiment", lambda x: (x == "negative").sum())
+            negative_reviews=("is_negative", "sum")
         )
         .reset_index()
     )
 
-    review_summary["negative_rate"] = (
-        review_summary["negative_reviews"] /
-        review_summary["total_reviews"]
-    ).fillna(0)
-
-else:
-    review_summary = pd.DataFrame()
-
-# =========================
-# PROCESS RETURNS (SEPARATE)
-# =========================
-if returns_file is not None:
-
-    returns = normalize(pd.read_csv(returns_file))
-
-    issue_col = None
-    for c in ["return_reason", "issue", "reason"]:
-        if c in returns.columns:
-            issue_col = c
-
-    refund_col = "refund_amount" if "refund_amount" in returns.columns else None
-
-    if issue_col:
-        returns_summary = (
-            returns.groupby(issue_col)
-            .agg(
-                returns=(issue_col, "count"),
-                revenue_loss=(refund_col, "sum") if refund_col else (issue_col, "count")
-            )
-            .reset_index()
-            .rename(columns={issue_col: "issue"})
-        )
-        total_revenue_loss = returns_summary["revenue_loss"].sum()
-    else:
-        returns_summary = pd.DataFrame()
-
-else:
-    returns_summary = pd.DataFrame()
-
-# =========================
-# MERGE AT ISSUE LEVEL
-# =========================
-if not review_summary.empty:
-    issue_baseline = review_summary.merge(
-        returns_summary,
-        on="issue",
-        how="left"
-    ).fillna(0)
-
-# =========================
-# DASHBOARD
-# =========================
-if issue_baseline is not None and not issue_baseline.empty:
-
-    st.subheader("📊 Return Risk Dashboard")
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.metric("💸 Estimated Revenue Loss", f"₹{int(total_revenue_loss):,}")
-        st.dataframe(issue_baseline.sort_values("negative_rate", ascending=False))
-
-    with col2:
-        fig, ax = plt.subplots()
-        ax.barh(issue_baseline["issue"], issue_baseline["negative_rate"])
-        ax.set_title("Negative Review Rate by Issue")
-        st.pyplot(fig)
-
-    # =========================
-    # ALERTS
-    # =========================
-    high_risk = issue_baseline[issue_baseline["negative_rate"] > 0.35]
-
-    if not high_risk.empty:
-        st.error("🚨 HIGH RETURN RISK DETECTED")
-        st.dataframe(high_risk[["issue", "negative_rate"]])
-
-    # =========================
-    # FUTURE RISK
-    # =========================
-    avg_risk = issue_baseline["negative_rate"].mean()
-    confidence = min(90, max(60, int(issue_baseline["total_reviews"].sum() / 8)))
-
-    st.success(
-        f"Expected future return risk: {round(avg_risk*100,2)}% "
-        f"(Confidence: {confidence}%)"
+    issue_baseline["negative_rate"] = (
+        issue_baseline["negative_reviews"] /
+        issue_baseline["total_reviews"]
     )
 
     # =========================
-    # AUTO FIXES
+    # RISK DASHBOARD
     # =========================
-    st.subheader("🛠️ Auto-Generated Fixes")
+    st.subheader("📊 AI-Detected Return Risk Drivers")
 
-    for _, r in high_risk.iterrows():
-        st.write(
-            f"• Improve **{r['issue']}** "
-            f"(~{round(r['negative_rate']*100,1)}% dissatisfaction)"
+    col1, col2 = st.columns(2)
+    with col1:
+        st.dataframe(
+            issue_baseline.sort_values(
+                "negative_rate", ascending=False
+            )
+        )
+    with col2:
+        fig, ax = plt.subplots()
+        ax.barh(
+            issue_baseline["issue"],
+            issue_baseline["negative_rate"]
+        )
+        ax.set_xlabel("Negative Review Rate")
+        st.pyplot(fig)
+
+    # =========================
+    # BUSINESS INPUTS
+    # =========================
+    st.subheader("💼 Business Assumptions")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        aov = st.number_input(
+            "Average Order Value (₹)",
+            500, 10000, 1500
+        )
+    with col2:
+        monthly_orders = st.number_input(
+            "Monthly Orders",
+            1000, 500000, 10000
         )
 
-# =========================
-# SKU PRE-LAUNCH SCORING
-# =========================
-if sku_file is not None:
+    issue_baseline["monthly_loss"] = (
+        issue_baseline["negative_rate"] *
+        monthly_orders *
+        aov
+    )
 
-    skus = normalize(pd.read_csv(sku_file))
-    st.subheader("🚀 Pre-Launch SKU Risk Scores")
+    # =========================
+    # SCENARIO PLANNER
+    # =========================
+    st.markdown("---")
+    st.subheader("🧪 Scenario Planner — Budget Allocation")
 
+    st.caption(
+        "Split improvement effort across Marketing, Product & Operations"
+    )
+
+    # Effectiveness multipliers
+    EFFECTIVENESS = {
+        "marketing": 0.4,
+        "product": 0.8,
+        "ops": 0.6
+    }
+
+    scenario = issue_baseline.copy()
     results = []
 
-    for _, sku in skus.iterrows():
-        if issue_baseline is not None:
-            top = issue_baseline.sort_values("negative_rate", ascending=False).iloc[0]
-            risk = round(top["negative_rate"], 2)
-            driver = top["issue"]
-            conf = min(90, max(60, int(top["total_reviews"] / 5)))
-        else:
-            risk = round(np.random.uniform(0.15, 0.35), 2)
-            driver = "Category Benchmark"
-            conf = 55
+    for _, row in scenario.iterrows():
+
+        st.markdown(f"### 🔧 Issue: {row['issue']}")
+
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            mkt = st.slider(
+                "Marketing %",
+                0, 50, 0, step=5,
+                key=f"m_{row['issue']}"
+            )
+        with col2:
+            prod = st.slider(
+                "Product %",
+                0, 50, 0, step=5,
+                key=f"p_{row['issue']}"
+            )
+        with col3:
+            ops = st.slider(
+                "Operations %",
+                0, 50, 0, step=5,
+                key=f"o_{row['issue']}"
+            )
+
+        effective_reduction = (
+            mkt * EFFECTIVENESS["marketing"] +
+            prod * EFFECTIVENESS["product"] +
+            ops * EFFECTIVENESS["ops"]
+        ) / 100
+
+        optimized_rate = max(
+            0,
+            row["negative_rate"] * (1 - effective_reduction)
+        )
+
+        optimized_loss = (
+            optimized_rate *
+            monthly_orders *
+            aov
+        )
 
         results.append({
+            "issue": row["issue"],
+            "current_risk": row["negative_rate"],
+            "optimized_risk": optimized_rate,
+            "current_loss": row["monthly_loss"],
+            "optimized_loss": optimized_loss,
+            "revenue_saved": row["monthly_loss"] - optimized_loss
+        })
+
+    scenario_df = pd.DataFrame(results)
+
+    # =========================
+    # SCENARIO OUTPUT
+    # =========================
+    st.markdown("---")
+    st.subheader("📈 Scenario Impact Summary")
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric(
+            "Current Monthly Loss",
+            f"₹{int(scenario_df.current_loss.sum()):,}"
+        )
+    with col2:
+        st.metric(
+            "Optimized Monthly Loss",
+            f"₹{int(scenario_df.optimized_loss.sum()):,}"
+        )
+    with col3:
+        st.metric(
+            "Revenue Saved",
+            f"₹{int(scenario_df.revenue_saved.sum()):,}"
+        )
+
+    fig, ax = plt.subplots()
+    ax.barh(
+        scenario_df["issue"],
+        scenario_df["current_loss"],
+        label="Current"
+    )
+    ax.barh(
+        scenario_df["issue"],
+        scenario_df["optimized_loss"],
+        label="Optimized"
+    )
+    ax.legend()
+    ax.set_title("Revenue Loss: Before vs After Budget Allocation")
+    st.pyplot(fig)
+
+    st.dataframe(
+        scenario_df.sort_values(
+            "revenue_saved", ascending=False
+        )
+    )
+
+    # =========================
+    # SKU MODEL
+    # =========================
+    reviews["issue_enc"] = le.fit_transform(reviews["issue"])
+    X = reviews[["issue_enc"]]
+    y = reviews["is_negative"]
+
+    sku_model = LogisticRegression()
+    sku_model.fit(X, y)
+
+# =========================
+# PRE-LAUNCH SKU SCORING
+# =========================
+if sku_file and sku_model is not None:
+
+    st.markdown("---")
+    st.subheader("🚀 Pre-Launch SKU Risk Prediction")
+
+    skus = normalize(pd.read_csv(sku_file))
+    top_issue = issue_baseline.sort_values(
+        "negative_rate", ascending=False
+    ).iloc[0]["issue"]
+
+    enc = le.transform([top_issue])[0]
+
+    output = []
+    for _, sku in skus.iterrows():
+        risk = sku_model.predict_proba([[enc]])[0][1]
+
+        decision = (
+            "🟢 Launch"
+            if risk < 0.25 else
+            "🟠 Improve Messaging"
+            if risk < 0.35 else
+            "🔴 Fix Product Before Launch"
+        )
+
+        output.append({
             "SKU": sku["sku_name"],
             "Category": sku["category"],
             "Price": sku["price"],
-            "Predicted Return Risk": risk,
-            "Primary Driver": driver,
-            "Confidence (%)": conf,
-            "Recommendation": "❌ Fix Before Launch" if risk > 0.3 else "✅ Safe to Launch"
+            "Return Risk": round(risk, 2),
+            "Decision": decision
         })
 
-    st.dataframe(pd.DataFrame(results))
+    st.dataframe(pd.DataFrame(output))
 
 # =========================
-# AI COPILOT
+# AI COPILOT (CMO)
 # =========================
 st.markdown("---")
-st.subheader("🤖 Ask the Copilot")
+st.subheader("🤖 AI Copilot (CMO)")
 
-q = st.text_input("Ask: Why are returns high? Should I launch this SKU?")
+q = st.text_input(
+    "Ask: Where should I invest? Product or Marketing? What saves more money?"
+)
 
 if q:
-    q = q.lower()
-    if "why" in q:
-        st.success("Returns are mainly driven by quality, fit, and delivery issues.")
-    elif "launch" in q:
-        st.success("Launch low-risk SKUs. Fix top issue drivers before scaling.")
-    elif "improve" in q:
-        st.success("Improve product quality, packaging, and expectation setting.")
-    else:
-        st.success("I’ve analyzed your data and identified key return risks.")
+    st.success(
+        "CMO Insight: Product investments yield highest risk reduction, "
+        "Marketing works best for expectation gaps, and Ops improves trust. "
+        "Focus budgets where revenue saved per % is highest."
+    )

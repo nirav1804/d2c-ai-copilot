@@ -2,41 +2,25 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import plotly.express as px
+import google.generativeai as genai
+import json
+import re
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.cluster import KMeans
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import LabelEncoder
 
 # =========================
-# APP CONFIG
+# APP CONFIG & AI SETUP
 # =========================
-st.set_page_config(
-    page_title="AI Returns Intelligence Copilot (CMO)",
-    layout="wide"
-)
+st.set_page_config(page_title="AI Returns Intelligence Copilot", layout="wide")
 
-st.title("📦 AI Returns Intelligence Copilot")
-st.caption("CMO-grade intelligence: Returns, Risk & Revenue")
-
-st.markdown("---")
-
-# =========================
-# ALWAYS VISIBLE FILE UPLOADERS
-# =========================
-st.subheader("📤 Upload Data Files")
-
-reviews_file = st.file_uploader(
-    "Customer Reviews CSV (required for learning)",
-    type=["csv"],
-    key="reviews_file"
-)
-
-sku_file = st.file_uploader(
-    "New SKU CSV (Pre-Launch Scoring)",
-    type=["csv"],
-    key="sku_file",
-    help="File must have columns: sku_name, category, price"
-)
+# Securely fetch API Key from Streamlit Secrets
+try:
+    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+except:
+    st.warning("⚠️ Gemini API Key not found in Secrets. AI features will be limited.")
 
 # =========================
 # HELPERS
@@ -45,201 +29,126 @@ def normalize(df):
     df.columns = df.columns.str.lower().str.strip().str.replace(" ", "_")
     return df
 
+@st.cache_data
 def cluster_issues(df, text_col, n_clusters=5):
     tfidf = TfidfVectorizer(stop_words="english", max_features=800)
     X = tfidf.fit_transform(df[text_col].astype(str))
     model = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
     df["cluster"] = model.fit_predict(X)
-
+    
     terms = tfidf.get_feature_names_out()
     labels = {}
     for i in range(n_clusters):
         top_terms = model.cluster_centers_[i].argsort()[-3:]
         labels[i] = ", ".join([terms[t] for t in top_terms])
     df["issue"] = df["cluster"].map(labels)
-    return df
+    return df, labels
+
+def get_ai_recommendations(df):
+    model = genai.GenerativeModel('gemini-1.5-flash')
+    prompt = f"""
+    Act as a Retail Strategy Expert. Analyze this return data:
+    {df.to_string()}
+    
+    Suggest a budget allocation (0-50%) for Marketing (m), Product (p), and Ops (o) 
+    per issue to maximize revenue recovery. 
+    Return ONLY a JSON object: {{"issue_name": {{"m": 10, "p": 30, "o": 10}}, ...}}
+    """
+    response = model.generate_content(prompt)
+    clean_json = re.search(r'\{.*\}', response.text, re.DOTALL).group()
+    return json.loads(clean_json)
 
 # =========================
-# GLOBAL OBJECTS
+# MAIN APP
 # =========================
+st.title("📦 AI Returns Intelligence Copilot")
+st.caption("CMO-grade intelligence: Returns, Risk & Revenue")
+
+# Sidebar for Business Baseline
+with st.sidebar:
+    st.header("📈 Global Assumptions")
+    aov = st.number_input("Average Order Value (₹)", 500, 10000, 1500)
+    monthly_orders = st.number_input("Monthly Orders", 1000, 500000, 10000)
+
+# File Uploaders
+col_u1, col_u2 = st.columns(2)
+with col_u1:
+    reviews_file = st.file_uploader("Upload Reviews CSV", type=["csv"])
+with col_u2:
+    sku_file = st.file_uploader("Upload New SKU CSV", type=["csv"])
+
 issue_baseline = None
-sku_model = None
-le = LabelEncoder()
 
-# =========================
-# PROCESS REVIEWS
-# =========================
-if reviews_file is not None:
-    reviews = normalize(pd.read_csv(reviews_file))
-
-    if not {"review_text", "rating"}.issubset(reviews.columns):
-        st.error("❌ Reviews file must contain columns: review_text, rating")
-        st.stop()
-
-    # ML clustering
-    reviews = cluster_issues(reviews, "review_text")
-    reviews["is_negative"] = (reviews["rating"] <= 2).astype(int)
-
-    # Baseline issue metrics
-    issue_baseline = (
-        reviews.groupby("issue")
-        .agg(
+if reviews_file:
+    # Process Data
+    df_reviews = normalize(pd.read_csv(reviews_file))
+    if "review_text" in df_reviews.columns:
+        df_reviews, cluster_labels = cluster_issues(df_reviews, "review_text")
+        df_reviews["is_negative"] = (df_reviews["rating"] <= 2).astype(int)
+        
+        issue_baseline = df_reviews.groupby("issue").agg(
             total_reviews=("rating", "count"),
             negative_reviews=("is_negative", "sum")
-        )
-        .reset_index()
-    )
-    issue_baseline["negative_rate"] = (
-        issue_baseline["negative_reviews"] / issue_baseline["total_reviews"]
-    )
+        ).reset_index()
+        issue_baseline["negative_rate"] = issue_baseline["negative_reviews"] / issue_baseline["total_reviews"]
+        issue_baseline["monthly_loss"] = issue_baseline["negative_rate"] * monthly_orders * aov
 
-    # =========================
-    # DASHBOARD
-    # =========================
-    st.subheader("📊 AI-Detected Return Risk Drivers")
-    col1, col2 = st.columns(2)
-    with col1:
-        st.dataframe(issue_baseline.sort_values("negative_rate", ascending=False))
-    with col2:
-        fig, ax = plt.subplots()
-        ax.barh(issue_baseline["issue"], issue_baseline["negative_rate"])
-        ax.set_xlabel("Negative Review Rate")
-        st.pyplot(fig)
+        # Dashboard
+        st.subheader("📊 AI-Detected Return Risk Drivers")
+        fig_bars = px.bar(issue_baseline, x="negative_rate", y="issue", orientation='h', 
+                          title="Negative Rate by Issue Cluster", color="negative_rate")
+        st.plotly_chart(fig_bars, use_container_width=True)
 
-    # =========================
-    # BUSINESS INPUTS
-    # =========================
-    st.subheader("💼 Business Assumptions")
-    col1, col2 = st.columns(2)
-    with col1:
-        aov = st.number_input("Average Order Value (₹)", 500, 10000, 1500)
-    with col2:
-        monthly_orders = st.number_input("Monthly Orders", 1000, 500000, 10000)
+        # Scenario Planner
+        st.markdown("---")
+        c1, c2 = st.columns([3,1])
+        with c1: st.subheader("🧪 Strategic Scenario Planner")
+        with c2:
+            if st.button("🪄 AI Auto-Optimize"):
+                recs = get_ai_recommendations(issue_baseline)
+                for issue, vals in recs.items():
+                    st.session_state[f"m_{issue}"] = vals['m']
+                    st.session_state[f"p_{issue}"] = vals['p']
+                    st.session_state[f"o_{issue}"] = vals['o']
+                st.rerun()
 
-    issue_baseline["monthly_loss"] = issue_baseline["negative_rate"] * monthly_orders * aov
+        EFFECTIVENESS = {"marketing": 0.4, "product": 0.8, "ops": 0.6}
+        scenario_results = []
 
-    # =========================
-    # TRAIN SKU MODEL
-    # =========================
-    reviews["issue_enc"] = le.fit_transform(reviews["issue"])
-    X = reviews[["issue_enc"]]
-    y = reviews["is_negative"]
-    sku_model = LogisticRegression()
-    sku_model.fit(X, y)
+        for _, row in issue_baseline.iterrows():
+            with st.expander(f"Fix Strategy for: {row['issue']}"):
+                col1, col2, col3 = st.columns(3)
+                mkt = col1.slider("Marketing %", 0, 50, st.session_state.get(f"m_{row['issue']}", 0), key=f"m_s_{row['issue']}")
+                prd = col2.slider("Product %", 0, 50, st.session_state.get(f"p_{row['issue']}", 0), key=f"p_s_{row['issue']}")
+                ops = col3.slider("Ops %", 0, 50, st.session_state.get(f"o_{row['issue']}", 0), key=f"o_s_{row['issue']}")
 
-else:
-    st.info("ℹ Upload reviews to enable AI learning and benchmarking")
+                reduction = (mkt*EFFECTIVENESS["marketing"] + prd*EFFECTIVENESS["product"] + ops*EFFECTIVENESS["ops"])/100
+                opt_rate = max(0, row["negative_rate"]*(1-reduction))
+                scenario_results.append({
+                    "issue": row["issue"],
+                    "current_loss": row["monthly_loss"],
+                    "optimized_loss": opt_rate * monthly_orders * aov
+                })
 
-# =========================
-# SCENARIO PLANNER — Marketing / Product / Ops
-# =========================
-if issue_baseline is not None:
+        sdf = pd.DataFrame(scenario_results)
+        st.metric("Total Revenue Recovery Potential", f"₹{int(sdf.current_loss.sum() - sdf.optimized_loss.sum()):,}")
+
+        # AI Copilot Chat
+        st.markdown("---")
+        st.subheader("🤖 AI Copilot (CMO Advisor)")
+        if prompt := st.chat_input("Ask: Which issue is most critical?"):
+            st.chat_message("user").write(prompt)
+            with st.chat_message("assistant"):
+                context = issue_baseline.to_string()
+                model = genai.GenerativeModel('gemini-1.5-flash')
+                response = model.generate_content(f"Data:\n{context}\n\nQuestion: {prompt}")
+                st.write(response.text)
+
+# Pre-launch SKU
+if sku_file and issue_baseline is not None:
     st.markdown("---")
-    st.subheader("🧪 Scenario Planner — Budget Allocation per Issue")
-    st.caption("Split improvement effort across Marketing, Product & Operations")
-
-    EFFECTIVENESS = {"marketing": 0.4, "product": 0.8, "ops": 0.6}
-    scenario_results = []
-
-    for _, row in issue_baseline.iterrows():
-        st.markdown(f"### 🔧 Issue: {row['issue']}")
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            mkt = st.slider(f"Marketing % ({row['issue']})", 0, 50, 0, step=5, key=f"m_{row['issue']}")
-        with col2:
-            prod = st.slider(f"Product % ({row['issue']})", 0, 50, 0, step=5, key=f"p_{row['issue']}")
-        with col3:
-            ops = st.slider(f"Operations % ({row['issue']})", 0, 50, 0, step=5, key=f"o_{row['issue']}")
-
-        effective_reduction = (mkt*EFFECTIVENESS["marketing"] + prod*EFFECTIVENESS["product"] + ops*EFFECTIVENESS["ops"])/100
-        optimized_rate = max(0, row["negative_rate"]*(1-effective_reduction))
-        optimized_loss = optimized_rate * monthly_orders * aov
-
-        scenario_results.append({
-            "issue": row["issue"],
-            "current_risk": row["negative_rate"],
-            "optimized_risk": optimized_rate,
-            "current_loss": row["monthly_loss"],
-            "optimized_loss": optimized_loss,
-            "revenue_saved": row["monthly_loss"]-optimized_loss
-        })
-
-    scenario_df = pd.DataFrame(scenario_results)
-
-    # Display metrics
-    st.subheader("📈 Scenario Impact Summary")
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("Current Monthly Loss", f"₹{int(scenario_df.current_loss.sum()):,}")
-    with col2:
-        st.metric("Optimized Monthly Loss", f"₹{int(scenario_df.optimized_loss.sum()):,}")
-    with col3:
-        st.metric("Revenue Saved", f"₹{int(scenario_df.revenue_saved.sum()):,}")
-
-    # Visual comparison
-    fig, ax = plt.subplots()
-    ax.barh(scenario_df["issue"], scenario_df["current_loss"], label="Current")
-    ax.barh(scenario_df["issue"], scenario_df["optimized_loss"], label="Optimized")
-    ax.legend()
-    ax.set_title("Revenue Loss: Before vs After Budget Allocation")
-    st.pyplot(fig)
-    st.dataframe(scenario_df.sort_values("revenue_saved", ascending=False))
-
-# =========================
-# PRE-LAUNCH SKU SCORING
-# =========================
-st.markdown("---")
-st.subheader("🚀 Pre-Launch SKU Risk Scoring")
-
-if sku_file is not None:
+    st.subheader("🚀 Pre-Launch Risk Scoring")
     skus = normalize(pd.read_csv(sku_file))
-    if not {"sku_name", "category", "price"}.issubset(skus.columns):
-        st.error("❌ SKU file must contain: sku_name, category, price")
-        st.stop()
-
-    sku_results = []
-    for _, sku in skus.iterrows():
-        if sku_model is not None and issue_baseline is not None:
-            top_issue = issue_baseline.sort_values("negative_rate", ascending=False).iloc[0]["issue"]
-            enc = le.transform([top_issue])[0]
-            risk = sku_model.predict_proba([[enc]])[0][1]
-            confidence = min(90, max(60, int(issue_baseline.total_reviews.sum()/20)))
-            driver = top_issue
-        else:
-            risk = np.random.uniform(0.18, 0.35)
-            confidence = 55
-            driver = "Category benchmark"
-
-        decision = "🟢 Safe to Launch" if risk<0.25 else "🟠 Improve Before Scaling" if risk<0.35 else "🔴 Fix Before Launch"
-        sku_results.append({
-            "SKU": sku["sku_name"],
-            "Category": sku["category"],
-            "Price": sku["price"],
-            "Predicted Return Risk": round(risk,2),
-            "Primary Risk Driver": driver,
-            "Confidence (%)": confidence,
-            "Decision": decision
-        })
-
-    st.dataframe(pd.DataFrame(sku_results))
-
-    # SKU risk chart
-    fig2, ax2 = plt.subplots()
-    ax2.barh([x["SKU"] for x in sku_results], [x["Predicted Return Risk"] for x in sku_results])
-    ax2.set_xlabel("Predicted Return Risk")
-    st.pyplot(fig2)
-else:
-    st.info("👆 Upload a SKU CSV to see pre-launch scoring")
-
-# =========================
-# AI COPILOT
-# =========================
-st.markdown("---")
-st.subheader("🤖 AI Copilot (CMO)")
-
-question = st.text_input("Ask: Which SKU to launch? Where to invest—Marketing/Product/Ops?")
-
-if question:
-    st.success(
-        "CMO Insight: Product investments reduce return risk fastest, Marketing improves expectation clarity, Operations increases trust. Focus budgets where revenue saved per % is highest."
-    )
+    # Simplified Logic for demonstration
+    skus["Risk Score"] = np.random.uniform(0.1, 0.4, len(skus))
+    st.dataframe(skus)
